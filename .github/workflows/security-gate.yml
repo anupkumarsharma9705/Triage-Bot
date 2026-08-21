@@ -1,0 +1,71 @@
+name: Security Gate
+
+on: [pull_request]
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Run OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          format: JSON
+
+      # NOTE: real Dependency-Check JSON is deeply nested and does not
+      # match this project's flattened DependencyCheckReport shape.
+      # A mapping/transform step is required here before ingest will
+      # work against real scanner output. Not yet implemented — see
+      # README limitations. This step is a placeholder for that mapping.
+      - name: Map Dependency-Check output to ingest format
+        run: |
+          echo "TODO: transform dependency-check-report.json into the flat"
+          echo "shape TriageController expects. Currently a manual/sample step."
+
+      - name: Build triage-bot jar
+        run: mvn -q clean package -DskipTests
+
+      - name: Start triage service
+        run: |
+          nohup java -jar target/triage-bot-0.1.0.jar > app.log 2>&1 &
+          for i in {1..15}; do
+            curl -s http://localhost:8080/api/report > /dev/null && break
+            sleep 2
+          done
+
+      - name: Ingest findings
+        run: |
+          curl -X POST "http://localhost:8080/api/ingest?sourceRoot=${{ github.workspace }}" \
+            -H "Content-Type: application/json" \
+            --data @sample-report.json
+
+      - name: Get ranked report
+        run: curl -s http://localhost:8080/api/report -o report.json
+
+      - name: Post PR comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SUMMARY=$(node -e "
+            const findings = require('./report.json');
+            const top = findings.slice(0, 10);
+            let body = '### Reachability-Aware Vulnerability Triage\n\n';
+            body += '| CVE | Dependency | CVSS | Reachable | Risk Score |\n';
+            body += '|---|---|---|---|---|\n';
+            for (const f of top) {
+              body += \`| \${f.cveId} | \${f.dependencyName} | \${f.cvssScore} | \${f.reachable} | \${f.riskScore.toFixed(2)} |\n\`;
+            }
+            console.log(body);
+          ")
+          curl -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -d "$(jq -n --arg body "$SUMMARY" '{body: $body}')"
