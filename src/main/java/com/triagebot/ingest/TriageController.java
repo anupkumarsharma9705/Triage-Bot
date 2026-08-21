@@ -3,6 +3,7 @@ package com.triagebot.ingest;
 import com.triagebot.finding.Finding;
 import com.triagebot.finding.FindingRepository;
 import com.triagebot.reachability.ReachabilityAnalyzer;
+import com.triagebot.scoring.RiskScoringService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -20,10 +21,14 @@ public class TriageController {
 
     private final FindingRepository findingRepository;
     private final ReachabilityAnalyzer reachabilityAnalyzer;
+    private final RiskScoringService riskScoringService;
 
-    public TriageController(FindingRepository findingRepository, ReachabilityAnalyzer reachabilityAnalyzer) {
+    public TriageController(FindingRepository findingRepository,
+                            ReachabilityAnalyzer reachabilityAnalyzer,
+                            RiskScoringService riskScoringService) {
         this.findingRepository = findingRepository;
         this.reachabilityAnalyzer = reachabilityAnalyzer;
+        this.riskScoringService = riskScoringService;
     }
 
     /**
@@ -62,8 +67,6 @@ public class TriageController {
         }
 
         findingRepository.saveAll(findings);
-
-        // Risk scoring (Day 2 AM) plugs in here, before saveAll, once it exists.
 
         return ResponseEntity.ok(findings.size() + " findings ingested");
     }
