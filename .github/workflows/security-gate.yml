@@ -2,6 +2,11 @@ name: Security Gate
 
 on: [pull_request]
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 jobs:
   triage:
     runs-on: ubuntu-latest
