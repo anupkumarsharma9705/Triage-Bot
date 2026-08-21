@@ -57,6 +57,10 @@ public class TriageController {
             }
         }
 
+        for (Finding f : findings) {
+            f.setRiskScore(riskScoringService.calculateRisk(f));
+        }
+
         findingRepository.saveAll(findings);
 
         // Risk scoring (Day 2 AM) plugs in here, before saveAll, once it exists.
