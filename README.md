@@ -1,144 +1,98 @@
 # Reachability-Aware Vulnerability Triage Bot
 
-A Spring Boot service that ingests SCA (dependency vulnerability) scan
-results, checks whether each vulnerable class is actually **reachable**
-in a target codebase, and (eventually) produces a risk-ranked report.
+A Spring Boot service that ingests SCA (dependency vulnerability) scan results,
+checks whether each vulnerable class is actually **reachable** in the target
+codebase, scores findings by real risk instead of raw CVSS, and posts a
+ranked report as a GitHub PR comment via CI.
 
-**Status: in progress.** See Build Log at the bottom for what's done vs. not.
+**Problem it addresses:** SCA scanners flag every CVE in your dependency tree
+by CVSS score alone, regardless of whether your code ever uses the vulnerable
+class. This creates alert fatigue — teams end up triaging dozens of findings
+manually to find the handful that matter. This tool adds a reachability
+filter as a first-pass signal.
 
----
+## Limitations
 
-## Problem statement
+- **Import-level, not method-call-level.** Checks whether a vulnerable
+  package is imported and referenced textually — does not trace whether the
+  specific vulnerable *method* is invoked, and does not build a call graph.
+- **No reflection or dependency-injection awareness.** Classes instantiated
+  via reflection or resolved dynamically by a DI container won't be detected
+  even if genuinely reachable.
+- **Single-module Maven projects only.** Not tested against multi-module repos.
+- **No runtime/dynamic tracing.** Purely static, source-level analysis.
+- **Scoring formula is a simple multiplier** (`cvss × reachMult × exposureMult`),
+  not calibrated against real incident data.
+- **Ingest format is simplified**, not raw OWASP Dependency-Check JSON — a
+  mapping step would be needed to consume real DC scanner output directly.
 
-SCA scanners (e.g. OWASP Dependency-Check) report every known CVE in your
-dependency tree, regardless of whether your code actually uses the
-vulnerable class. This causes alert fatigue — teams triage dozens of
-findings that pose no real risk because the vulnerable code path is
-never executed. This tool adds a reachability signal on top of raw
-CVSS scores to help prioritize what's actually worth fixing first.
-
----
+A production tool (e.g. Endor Labs, Semgrep Reachability) addresses these
+gaps with bytecode analysis and runtime instrumentation.
 
 ## Architecture
 
-```
-Dependency-Check JSON
-        │
-        ▼
-POST /api/ingest (sourceRoot, report)
-        │
-        ├─► ReachabilityAnalyzer (JavaParser)
-        │     scans sourceRoot's .java files for
-        │     import-level references to each
-        │     vulnerable class
-        │
-        └─► Finding entity (persisted via JPA/H2)
-                cveId, dependencyName, vulnerableClass,
-                cvssScore, reachable, riskScore, scannedAt
-```
+Dependency-check JSON
+↓
+/api/ingest endpoint (parses report, saves findings)
+↓
+Reachability analyzer (checks imports via JavaParser)
+↓
+H2 database (findings marked reachable / not)
+↓
+/api/report (ranked by risk score)
+↓
+GitHub Actions (posts ranked table as PR comment)
 
-Planned (not yet built): `RiskScoringService`, `/api/report`,
-GitHub Actions integration, PR comment posting.
 
----
+## Tech Stack
 
-## What "reachable" means here (read this before trusting the output)
+Java 21, Spring Boot 3.x, Spring Data JPA, H2, JavaParser, GitHub Actions.
 
-Reachability in this tool is **import-level only**:
-
-> Does any `.java` file in the scanned source tree import the vulnerable
-> package, or textually reference the vulnerable class's simple name in
-> a method call?
-
-This is **not** call-graph analysis. It does not confirm the specific
-vulnerable *method* is actually invoked, does not trace execution paths,
-and does not understand reflection or dependency injection. A class
-that's imported but never actually used in a risky way will still be
-flagged reachable (false positive risk). A class instantiated only via
-reflection or DI without a direct import may be missed (false negative
-risk).
-
-Full limitations list is at the bottom, and will be expanded after
-manual validation (planned for the "Honesty Fixes" pass).
-
----
-
-## Tech stack
-
-| Purpose | Tool |
-|---|---|
-| Backend | Spring Boot 3.3.4 (Web, JPA) |
-| Reachability parsing | JavaParser (`javaparser-core`) |
-| Persistence | H2 (in-memory, dev) |
-| JSON | Jackson (bundled with Spring Web) |
-
----
-
-## How to run it
-
-Requires Java 21 and Maven.
+## How to Run
 
 ```bash
-mvn spring-boot:run
+mvn clean package -DskipTests
+java -jar target/triage-bot-0.1.0.jar
 ```
 
-Ingest a sample report:
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8080/api/ingest?sourceRoot=C:\path\to\source" `
-  -Method Post -ContentType "application/json" -InFile "sample-report.json"
-```
+Ingest a report against a target codebase:
 
 ```bash
-curl.exe -X POST "http://localhost:8080/api/ingest?sourceRoot=/path/to/source" \
-  -H "Content-Type: application/json" --data "@sample-report.json"
+curl -X POST "http://localhost:8080/api/ingest?sourceRoot=<path-to-java-source>" \
+  -H "Content-Type: application/json" \
+  --data @sample-report.json
 ```
 
-`sourceRoot` must point at a real directory of `.java` files — the code
-being checked for reachability, not this project itself (though pointing
-it at this project's own `src` works fine as a test).
+Get the ranked report:
 
-Inspect persisted data via H2 console: `http://localhost:8080/h2-console`
-JDBC URL: `jdbc:h2:mem:triagebot`, user `sa`, blank password.
+```bash
+curl http://localhost:8080/api/report
+```
 
----
+## Sample Output
 
-## Known limitations (updated as found)
+Tested against a real Spring Boot project (external repo, not authored by
+this project) with 3 sample CVEs:
 
-- Reachability is import-level, not method-call-level.
-- No support for reflection-based instantiation or DI resolving classes
-  dynamically.
-- No call-graph traversal — a file that imports a package but never
-  calls the vulnerable method is still flagged reachable.
-- Single-directory scans only — not tested against multi-module Maven
-  projects.
-- No runtime/dynamic tracing — purely static, source-level analysis.
-- `DependencyCheckReport` is a simplified flat JSON shape, not the real
-  nested OWASP Dependency-Check schema — real DC output needs a mapping
-  step before it can be ingested as-is.
-- Risk scoring formula (once built) will be a simple multiplier, not
-  calibrated against real incident data.
+| CVE | Dependency | Reachable | Manually verified |
+|---|---|---|---|
+| CVE-TEST-REAL | jjwt | true | Confirmed: `io.jsonwebtoken.Jwts` genuinely imported in target's JWT filter |
+| CVE-2022-5678 | commons-text-1.9.jar | false | Confirmed: no import found anywhere in target source |
+| CVE-2021-9999 | log4j-core-2.14.1.jar | false | Confirmed: no import found anywhere in target source |
 
----
+3 of 3 tool verdicts matched manual source inspection. Small sample size —
+not a large-scale validation.
 
-## Build Log
+## CI Integration
 
-**Day 1 AM** — Spring Boot skeleton, `Finding` entity, H2 config,
-`FindingRepository`, `/api/ingest` parsing a flattened sample JSON and
-persisting `Finding` rows.
+See `.github/workflows/security-gate.yml` — runs on every pull request,
+builds and starts the service, ingests `sample-report.json` against the
+checked-out source, and posts the ranked findings as a PR comment.
 
-**Day 1 PM** — `ReachabilityAnalyzer` (JavaParser, import-level scan)
-wired into `/api/ingest` via a new `sourceRoot` request parameter. Each
-`Finding` gets `reachable` set before saving. Fails safe: if analysis
-throws, `reachable` defaults to `true` (avoids silently hiding a
-possible risk).
+## How to Extend
 
-**Day 2 AM** — *not yet done.* Planned: `RiskScoringService`,
-`/api/report`.
-
-**Day 2 PM** — *not yet done.* Planned: GitHub Actions workflow, PR
-comment posting.
-
-**Day 3** — *not yet done.* Planned: manual validation of 10-15
-findings against real source, precise naming pass, expanded limitations
-section, final polish.
+- Method-level reachability via call-graph traversal (deeper JavaParser usage
+  or Soot bytecode analysis)
+- Real OWASP Dependency-Check JSON parsing (mapping layer)
+- Multi-module Maven support
+- Scoring formula calibration against real incident/exploit data
